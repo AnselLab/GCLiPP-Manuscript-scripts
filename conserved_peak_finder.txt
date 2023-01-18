@@ -1,0 +1,574 @@
+
+use List::Util 'max';
+use List::Util qw(sum);
+use Statistics::Basic;
+use Statistics::R;
+use POSIX;
+use Data::Dumper qw(Dumper);
+
+foreach $parameter( @ARGV )
+{
+	if( substr($parameter,0,1) eq '-')
+	{
+		($pname, $pval) = split( '=',substr($parameter,1)) ;
+		if ($pval eq '') { $pval = 1; }
+		$PARAMS{$pname} = $pval;
+	}
+		
+}
+
+#global peak calling parameters
+
+my $WINDOW_WIDTH = 70;
+my $HALF = int($WINDOW_WIDTH / 2);
+
+#SEMI-STRINGENT MODE
+dmy $MINIMUM_CORRELATION = 0.75;
+my $MINIMUM_BIGGER_PEAK_HEIGHT = 0.5;
+my $MINIMUM_SMALLER_PEAK_HEIGHT = 0.20;
+my $MINIMUM_RAW_PEAK_HEIGHT = 10;
+
+
+#STRINGENT MODE
+#my $MINIMUM_CORRELATION = 0.85;
+#my $MINIMUM_BIGGER_PEAK_HEIGHT = 0.6;
+#my $MINIMUM_SMALLER_PEAK_HEIGHT = 0.25;
+#my $MINIMUM_RAW_PEAK_HEIGHT = 10;
+
+my $human_WATSON_bam = "/Users/DarthRNA/Documents/Didi/jurkat_may17/alignments/uj_bam/jurkat_all_WATSON.bam";
+my $human_CRICK_bam = "/Users/DarthRNA/Documents/Didi/jurkat_may17/alignments/uj_bam/jurkat_all_CRICK.bam";
+
+my $mouse_WATSON_bam = "/Users/DarthRNA/Documents/Hana/oct15_meta/alignments/uj_bam/everything_WATSON.bam";
+my $mouse_CRICK_bam = "/Users/DarthRNA/Documents/Hana/oct15_meta/alignments/uj_bam/everything_CRICK.bam";
+
+
+
+my $human_annotated_bed = '/Users/DarthRNA/Documents/Frisco/compare_jan18/chain/hg38_annotated_unique.bed';
+my $mouse_annotated_bed = '/Users/DarthRNA/Documents/Frisco/compare_jan18/chain/mm10_hg38_annotated_unique.bed';
+
+#my $human_annotated_bed = '/Users/DarthRNA/Documents/Frisco/compare_jan18/hg38_shortest.bed' if $PARAMS{short};
+#my $mouse_annotated_bed = '/Users/DarthRNA/Documents/Frisco/compare_jan18/mm10_shortest.bed' if $PARAMS{short};
+
+#my $alignment_dir = '/Users/DarthRNA/Documents/Frisco/phylogeny_jan18/alignments/';
+
+#my $phylop_file = '/Users/DarthRNA/Documents/Frisco/phylogeny_jan18/annotated/phylop_scores.txt';
+
+#my $human_annotated_bed = '/Users/DarthRNA/Documents/Frisco/compare_jan18/chain/hg38_mm10_3putr.bed';
+#my $mouse_annotated_bed = '/Users/DarthRNA/Documents/Frisco/compare_jan18/chain/mm10_3putr_custom.bed';
+
+
+my $alignment_dir = '/Users/DarthRNA/Documents/Frisco/compare_jan18/alignments3/';
+
+my $phylop_file = '/Users/DarthRNA/Documents/Frisco/compare_jan18/chain/phylop_scores.txt';
+
+
+open (PHYLOP, $phylop_file);
+
+while(<PHYLOP>)
+{
+	chomp;
+	my ($symbol, $phylop, $abs_phylop) = split;
+	$phylop{$symbol} = $phylop;
+	$absphylop{$symbol} = $abs_phylop;
+}
+close PHYLOP;
+
+
+
+open (HBED, $human_annotated_bed);
+
+while(<HBED>)
+{
+	my ($chr, $start, $end, $name, $score, $strand) = split;
+	chomp;
+	$bed{$name}{human} = $_;
+}
+close HBED;
+
+open (MBED, $mouse_annotated_bed);
+
+while(<MBED>)
+{
+	my ($chr, $start, $end, $name, $score, $strand) = split;
+	chomp;
+	$bed{$name}{mouse} = $_;
+}
+close MBED;
+
+
+my $human_bed = 'human.bed';
+$human_bed = $PARAMS{humanbed} if $PARAMS{humanbed};
+open (my $human_fh, '>', $human_bed);
+my $mouse_bed = 'mouse.bed';
+$mouse_bed = $PARAMS{mousebed} if $PARAMS{mousebed};
+open (my $mouse_fh, '>', $mouse_bed);
+
+
+
+foreach $symbol (sort keys %bed)
+{
+
+	print $symbol . ":\n";
+	
+
+	my $mouse_strand; 
+	my $human_strand; 
+
+	my $human_start;
+	my $mouse_start; 
+
+	my $human_end;
+	my $mouse_end; 
+
+	my $human_chr;
+	my $mouse_chr; 
+
+
+	next unless $bed{$symbol}{human} && $bed{$symbol}{mouse};
+
+	$_ = $bed{$symbol}{human};
+	my ($chr, $start, $end, $name, $score, $strand) = split;
+
+	$human_chr = $chr;
+	$human_start = $start; $human_end = $end;
+
+	$bed_entry_width = ($end - $start);
+
+	if ($strand eq '+')	{ $human_strand = '+'; open(DEPTH, "samtools depth -r $chr:$start-$end  $human_WATSON_bam |") || die; }	
+	if ($strand eq '-')	{ $human_strand = '-';	open(DEPTH, "samtools depth -r $chr:$start-$end  $human_CRICK_bam |") || die; }	
+
+
+	my %human_unscaled;
+	my %human;
+	my $human_sum = 0;
+	my $max = 0;
+	my $human_max = 0;
+	my $mouse_max = 0;
+	
+	while (<DEPTH>) 
+	{
+		chomp;
+		my (undef, $pos, $depth) = split ("\t");
+		$max = $depth if $depth > $max;
+		$human_unscaled{$pos} = $depth;
+		$human_sum += $depth; 
+	}
+	close DEPTH;
+
+	$human_max = $max;
+
+	foreach $pos (keys %human_unscaled)
+	{
+		$human{$pos} = $human_unscaled{$pos} / $max;
+	}
+
+	my $human_average_depth = $human_sum / ($human_end - $human_start);
+#	print Dumper \%human;
+		
+
+	$_ = $bed{$symbol}{mouse};
+	my ($chr, $start, $end, $name, $score, $strand) = split;
+
+	$mouse_chr = $chr;
+	$mouse_start = $start; $mouse_end = $end;
+
+	if ($strand eq '+')	{ $mouse_strand = '+';	open(DEPTH, "samtools depth -r $chr:$start-$end  $mouse_WATSON_bam |") || die; }	
+	if ($strand eq '-')	{ $mouse_strand = '-';	open(DEPTH, "samtools depth -r $chr:$start-$end  $mouse_CRICK_bam |") || die; }	
+			
+	
+	my %mouse_unscaled;
+	my %mouse;
+	my $max = 0;
+	my $mouse_sum = 0;
+
+	while (<DEPTH>) 
+	{
+		chomp;
+		my (undef, $pos, $depth) = split ("\t");
+		$max = $depth if $depth > $max;
+		$mouse_unscaled{$pos} = $depth;
+		$mouse_sum += $depth; 
+	}
+	close DEPTH;
+
+	$mouse_max = $max;
+
+	foreach $pos (keys %mouse_unscaled)
+	{
+		$mouse{$pos} = $mouse_unscaled{$pos} / $max;
+	}
+
+	my $mouse_average_depth = $mouse_sum / ($mouse_end - $mouse_start);
+
+	my $alignment_file = $alignment_dir . $symbol . '_aligned.fa';
+	my $human_alignment = '';
+	my $mouse_alignment = '';
+	my $species = 0;
+	open (ALIGN, $alignment_file);
+	while (<ALIGN>)
+	{	
+		chomp;
+		$species++ if index($_,"hg38") != -1 || index($_,"mm10") != -1;
+		next if index($_,"hg38") != -1 || index($_,"mm10") != -1;
+		
+		if($species == 1)
+		{
+			$human_alignment .= $_;
+		}
+		elsif($species > 1 )
+		{
+			$mouse_alignment .= $_;
+		}
+
+	}
+	close ALIGN;
+
+	my @human_nts = split("",uc $human_alignment);
+	my @mouse_nts = split("",uc $mouse_alignment);
+
+	#my @human_coverage = (0) x scalar(@human_nts);
+	#my @mouse_coverage = (0) x scalar(@mouse_nts);
+
+	my @human_coverage = ();
+	my @mouse_coverage = ();
+
+	my @human_position = ();
+	my @mouse_position = ();
+
+	my $human_counter = 0;
+	my $mouse_counter = 0;
+
+	my $aligned_nucleotides = 0;
+	my $identical_nucleotides = 0;
+	my $WS = 0;
+	my $SW = 0;
+	my $RY = 0;
+	my $YR = 0; 
+	my $KM = 0;
+	my $MK = 0;
+
+
+	#print "$symbol... Human: "; print scalar @human_nts; 
+	#print "\nMouse: "; print scalar @mouse_nts; print "\n\n";
+	next if (scalar @human_nts != scalar @mouse_nts) || !(scalar @human_nts);
+
+	for (my $q = 0; $q < scalar(@human_nts); $q++ )
+	{
+		$h = $human_nts[$q];
+		$m = $mouse_nts[$q];
+
+		if ($h eq 'A' || $h eq 'C' || $h eq 'G'	|| $h eq 'T')
+		{
+			$human_counter++;
+		}
+		if ($m eq 'A' || $m eq 'C' || $m eq 'G'	|| $m eq 'T')
+		{
+			$mouse_counter++;
+		}
+		
+		#print  $h . "|" . $m . "\\" . $human_counter . "\\" . $mouse_counter . " ";
+
+		#print "\tBad!\n" if $h eq '-' || $m eq '-';
+
+		next if $h eq '-' || $m eq '-';
+
+		$human_position[$aligned_nucleotides] = $human_counter;
+		$mouse_position[$aligned_nucleotides] = $mouse_counter;
+
+		$aligned_nucleotides++;
+		
+		$identical_nucleotides++ if $h eq $m;
+		$SW++ if ($h eq 'G' || $h eq 'C') && ($m eq 'A' || $m eq 'T');
+		$WS++ if ($h eq 'A' || $h eq 'T') && ($m eq 'G' || $m eq 'C');
+		$RY++ if ($h eq 'A' || $h eq 'G') && ($m eq 'C' || $m eq 'T');		
+		$YR++ if ($h eq 'C' || $h eq 'T') && ($m eq 'A' || $m eq 'G');
+		$KM++ if ($h eq 'G' || $h eq 'T') && ($m eq 'A' || $m eq 'C');
+		$MK++ if ($h eq 'A' || $h eq 'C') && ($m eq 'G' || $m eq 'T');
+
+		#print "\tGood!\t";
+
+		if($human_strand eq '-')
+		{
+			$human_loc = $human_end-$human_counter+1;
+					}
+		elsif($human_strand eq '+')
+		{
+			$human_loc = $human_start+$human_counter-1;
+		}
+
+		my $human_cov = $human{$human_loc};
+		$human_cov = 0 unless $human_cov > 0;
+
+	#	print "$human_loc $human_strand $human_cov |";
+
+		push(@human_coverage, $human_cov);
+
+		#print Dumper \@human_coverage;
+
+		if($mouse_strand eq '-')
+		{
+			$mouse_loc = $mouse_end-$mouse_counter+1;
+		}
+		elsif($mouse_strand eq '+')
+		{
+			$mouse_loc = $mouse_start+$mouse_counter-1;
+		}
+
+		my $mouse_cov = $mouse{$mouse_loc};
+		$mouse_cov = 0 unless $mouse_cov > 0;
+
+		push(@mouse_coverage, $mouse_cov);
+
+
+	#	print "Loc:\t$human_loc\t$mouse_loc\tCov:\t$human_cov\t$mouse_cov\n";
+
+	}
+
+	my @maxima = ();
+	my @peak_locations = ();
+	my @test_scores = ();
+	my @hs = ();
+	my @ms = ();
+	my @ps = ();
+	my @mmax = ();
+	my @hmax = ();
+	my $prev_cmp = 0;
+
+	$Data::Dumper::Indent = 0;
+
+	#print Dumper \@human_coverage;
+	#print Dumper \@mouse_coverage;
+
+	for (my $q = 0; $q < $aligned_nucleotides - $WINDOW_WIDTH; $q++ )
+	{
+		my @human_window = @human_coverage[$q .. $q+$WINDOW_WIDTH-1];
+		my @mouse_window = @mouse_coverage[$q .. $q+$WINDOW_WIDTH-1];
+
+		my $human_max = max @human_window; 
+		my $mouse_max = max @mouse_window;
+
+
+		my @human_idealized_peak = getNormal($WINDOW_WIDTH, $human_max);
+		my @mouse_idealized_peak = getNormal($WINDOW_WIDTH, $mouse_max);
+
+	#	print "$q Human:";
+	#	print Dumper \@human_window;
+	#	print "$q Mouse:";
+	#	print Dumper \@mouse_window; 
+
+		my $p = pearson(\@human_window, \@mouse_window);
+		my $m = pearson(\@human_window, \@human_idealized_peak);
+		my $h = pearson(\@mouse_window, \@mouse_idealized_peak);
+
+		push(@test_scores,$p+$m+$h);
+		push(@ps,$p);
+		push(@ms,$m);
+		push(@hs,$h);
+		push(@mmax,max @mouse_window);
+		push(@hmax,max @human_window);
+	}
+
+	#print Dumper \@test_scores;
+	
+	for (my $i = 0; $i < $aligned_nucleotides- $WINDOW_WIDTH; $i++ )
+	{
+		my $cmp = $test_scores[$i] <=> $test_scores[$i+1];
+		if ($cmp != $prev_cmp)  #if this comparison is not equal to the previous one...
+		{
+				
+			my $test = $test_scores[$i] > 2 && $ps[$i] > $MINIMUM_CORRELATION && 
+			($mmax[$i] > $MINIMUM_BIGGER_PEAK_HEIGHT || $hmax[$i] > $MINIMUM_BIGGER_PEAK_HEIGHT) &&
+			$mmax[$i] > $MINIMUM_SMALLER_PEAK_HEIGHT && $hmax[$i] > $MINIMUM_SMALLER_PEAK_HEIGHT
+			&& $hmax[$i] * $human_max > $MINIMUM_RAW_PEAK_HEIGHT && $mmax[$i] * $mouse_max > $MINIMUM_RAW_PEAK_HEIGHT;
+			
+			if($cmp > 0 && $test)  #and this entry is bigger than the next one...
+			{
+				#then we've found a local maximum so add it to the list of peaks unless it's very close to the previous
+				#peak in which case we only keep the better of the two
+				$last_maximum = $maxima[-1];
+				$last_location = $peak_locations[-1];
+				$maximum = $test_scores[$i];
+				$peak_location = $i; 
+				#if the peaks are not too close together add the new one
+				if(abs($peak_location - $last_location) > $HALF)
+				{
+					push(@maxima, $maximum);
+					push(@pp, $ps[$i]);push(@mp, $ms[$i]);push(@hp, $hs[$i]);
+ 					push(@peak_locations, $peak_location);
+ 				} #if they are, but the new peak is better, then ditch the last one and add the new one
+ 				elsif( $maximum > $last_maximum)
+ 				{
+ 					pop(@maxima);
+ 					pop(@pp);pop(@mp);pop(@hp);
+ 					pop(@peak_locations);
+ 					push(@maxima, $maximum);
+ 					push(@pp, $ps[$i]);push(@mp, $ms[$i]);push(@hp, $hs[$i]);
+ 					push(@peak_locations, $peak_location);
+ 				}
+				else #if they are too close but the last one was better do nothing, skip this one
+				{}
+ 						
+ 			}
+ 			
+ 			# when this and next elements are ==, defer checking for
+  			# minima/maxima till next loop iteration
+  			$prev_cmp = $cmp if $cmp;
+		}
+		
+	}
+
+	#print Dumper \@test_scores;
+	#print Dumper \@maxima;
+	#print Dumper \@pp;  print Dumper \@hp; print Dumper \@mp;
+	#print Dumper \@peak_locations;
+	my $c = 0;
+
+	
+	foreach (@peak_locations)
+	{
+
+		my $mouse_bed_start; 
+		my $mouse_bed_end;
+		my $human_bed_start;
+		my $human_bed_end;
+
+		if($mouse_strand eq '-')
+		{
+			$mouse_bed_end = $mouse_end - $mouse_position[$_];
+			$mouse_bed_start = $mouse_end - $mouse_position[$_+$WINDOW_WIDTH];  
+		}
+		if($mouse_strand eq '+')
+		{
+			$mouse_bed_start = $mouse_start + $mouse_position[$_];
+			$mouse_bed_end = $mouse_start + $mouse_position[$_+$WINDOW_WIDTH];
+		}
+
+		if($human_strand eq '-')
+		{
+			$human_bed_end = $human_end - $human_position[$_];
+			$human_bed_start = $human_end - $human_position[$_+$WINDOW_WIDTH];  
+		}
+		if($human_strand eq '+')
+		{
+			$human_bed_start = $human_start + $human_position[$_];
+			$human_bed_end = $human_start + $human_position[$_+$WINDOW_WIDTH];
+		}
+		my $score = $maxima[$c]; $c++;
+
+		print $human_fh "$human_chr\t$human_bed_start\t$human_bed_end\t$symbol\t$score\t$human_strand\n";
+		print $mouse_fh "$mouse_chr\t$mouse_bed_start\t$mouse_bed_end\t$symbol\t$score\t$mouse_strand\n";
+
+
+	}
+
+	
+
+
+
+
+}
+
+close $human_fh;
+close $mouse_fh;
+
+
+
+sub pearson
+{
+
+	my @x = @{$_[0]};
+	my @y = @{$_[1]};
+
+	#print "\n\n\nX:\n\n\n";
+	#print @x; 
+	
+	
+	$x_m = A(@x);
+	$y_m = A(@y);
+	
+	$sigma_x = sum(@x);
+	$sigma_y = sum(@y);
+
+	
+	$sigma_xy = 0;
+	$sigma_sx = 0;
+	$sigma_sy = 0; 
+	
+	$n = scalar @x;
+	$len = scalar @x - 1;
+	for $i (0 .. $len)
+	{
+		$sigma_xy += $x[$i] * $y[$i];
+		$sigma_sx += ($x[$i] - $x_m) * ($x[$i] - $x_m); 
+		$sigma_sy += ($y[$i] - $y_m) * ($y[$i] - $y_m); 
+		
+	}
+	
+	return 'NA' if $len == 0;
+
+
+	$sx = sqrt( (1 / $len) * $sigma_sx );
+	$sy = sqrt( (1 / $len) * $sigma_sy );
+	
+	$top = ( $sigma_xy - ( $n * $x_m * $y_m ) ) ;
+	$bottom = ($len * $sx * $sy );
+	
+	#return 0 if $top == 0;
+	return 'NA' if $bottom == 0;
+
+
+	return $top / $bottom; 
+	
+} 
+	
+	
+sub getNormal
+{
+	#getNormal(51, 0.8) 
+
+	#return numerical approximation of a normal distribution from -1 to 1 with sigma^2 = 0.2 as an array of width 51 and height 0.8
+	  
+	#first number should be odd -- will return an odd number of entries even if first number is even
+	  
+	my $w = $_[0];
+	my $h = $_[1];
+	
+	my @toreturn = (0) x $w;
+
+	return @toreturn if $h == 0;
+
+	my $half = int($w/2);
+	  
+	my $mu = 0;
+	my $sigma = 0.4472135955;
+	my $pi = 3.14159265359;
+	my $e = 2.718281828459;
+
+	
+	my $sd = $_[0] / (2*$_[1]);
+	
+	for $i(-$half .. $half)
+	{
+		
+		$x = $i/$half;
+		$b = $e ** ( -2.5 * ( ($x * $x) ) ) ;	 #2.5 is hardcoded b/c sigma^2 = 0.2 
+		$q = $i + $half;
+        $r = $h * $b;
+		$toreturn[$q] = $r;
+	}
+	
+	return @toreturn;
+}
+
+
+	
+sub A
+{
+        my $a = 0;
+        $a += $_ for @_;
+
+        return 0 unless @_;
+        return $a / @_;
+}
+
+
