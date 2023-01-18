@@ -1,3 +1,4 @@
+#Creator: Adam Litterman
 
 use List::Util 'max';
 use List::Util qw(sum);
